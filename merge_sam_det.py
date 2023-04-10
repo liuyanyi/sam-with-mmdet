@@ -6,7 +6,7 @@ import fire
 
 
 def merge_sam_det(sam_ckpt: str = './sam_vit_b_01ec64.pth',
-                  rtm_ckpt: str = './rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth',
+                  det_ckpt: str = './rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth',
                   config: str = 'configs/rtm_tiny_sam_b.py',
                   output: str = './test_convert.pth'):
 
@@ -14,17 +14,10 @@ def merge_sam_det(sam_ckpt: str = './sam_vit_b_01ec64.pth',
     mm_model = init_detector(config, device='cpu', palette='coco')
 
     sam_state_dict = torch.load(sam_ckpt, map_location='cpu')
-    det_state_dict = torch.load(rtm_ckpt, map_location='cpu')
+    det_state_dict = torch.load(det_ckpt, map_location='cpu')
 
     # rebuild the weight dict
     mm_weight = get_state_dict(mm_model)
-
-    mm_weight_dict = {}
-    for k, v in mm_weight.items():
-        prefix = k.split('.')[0]
-        if prefix not in mm_weight_dict:
-            mm_weight_dict[prefix] = {}
-        mm_weight_dict[prefix][k] = v
 
     for k in mm_weight.keys():
         prefix, weight_name = k.split('.', 1)
