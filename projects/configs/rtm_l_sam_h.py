@@ -1,15 +1,17 @@
-from functools import partial
-import torch
-
-_base_ = 'mmdet::_base_/default_runtime.py'
+_base_ = [
+    'mmdet::_base_/default_runtime.py',
+    'mmdet::_base_/schedules/schedule_2x.py',
+    'mmdet::_base_/datasets/coco_detection.py'
+]
 
 custom_imports = dict(
-    imports=['projects.sam'], allow_failed_imports=False)
+    imports=['projects.sam'])
 
 prompt_embed_dim = 256
 image_size = 1024
 vit_patch_size = 16
 image_embedding_size = image_size // vit_patch_size
+
 
 model = dict(
     type='SAM',
@@ -21,19 +23,26 @@ model = dict(
         pad_size_divisor=32),
     backbone=dict(
         type='ImageEncoderViT',
-        depth=12,
-        embed_dim=768,
+        depth=32,
+        embed_dim=1280,
         img_size=image_size,
         mlp_ratio=4,
-        norm_layer=partial(torch.nn.LayerNorm, eps=1e-6),
-        num_heads=12,
+        num_heads=16,
         patch_size=16,
         qkv_bias=True,
         use_rel_pos=True,
-        global_attn_indexes=[2, 5, 8, 11],
+        global_attn_indexes=[7, 15, 23, 31],
         window_size=14,
-        out_chans=prompt_embed_dim),
-    neck=None,
+        out_chans=prompt_embed_dim,
+        with_neck=False),
+    neck=dict(
+        type='SimpleFPN',
+        backbone_channel=1280,
+        in_fpn_level=(2, 2),
+        in_channels=[1280, ],
+        out_channels=256,
+        num_outs=1,
+        norm_cfg=dict(type='LayerNorm2d', eps=1e-6)),
     prompt_generator=dict(
         type='RTMDet',
         data_preprocessor=dict(
@@ -61,7 +70,7 @@ model = dict(
             act_cfg=dict(type='SiLU', inplace=True)),
         bbox_head=dict(
             type='RTMDetSepBNHead',
-            num_classes=80,
+            num_classes=10,
             in_channels=256,
             stacked_convs=2,
             feat_channels=256,
@@ -113,78 +122,126 @@ model = dict(
         iou_head_hidden_dim=256),
     train_cfg=None,
     test_cfg=dict(
+        prompt_type='box',
         points_per_side=32,
         multimask_output=False,
         points_per_batch=64,
-        pred_iou_thresh=0.7,
-        stability_score_thresh=0,
+        pred_iou_thresh=0.0,
+        stability_score_thresh=0.0,
         stability_score_offset=1.0,
-        nms=dict(type='nms', iou_threshold=0.5))
+        nms=None)
 )
 
-dataset_type = 'CocoDataset'
-data_root = 'data/coco/'
-
-# Example to use different file client
-# Method 1: simply set the data root and let the file I/O module
-# automatically infer from prefix (not support LMDB and Memcache yet)
-
-# data_root = 's3://openmmlab/datasets/detection/coco/'
-
-# Method 2: Use `backend_args`, `file_client_args` in versions before 3.0.0rc6
-# backend_args = dict(
-#     backend='petrel',
-#     path_mapping=dict({
-#         './data/': 's3://openmmlab/datasets/detection/',
-#         'data/': 's3://openmmlab/datasets/detection/'
-#     }))
-backend_args = None
 
 train_pipeline = [
-    dict(type='LoadImageFromFile', backend_args=backend_args),
-    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
-    dict(type='Resize', scale=(1333, 800), keep_ratio=True),
+    dict(type='LoadImageFromFile', backend_args={{_base_.backend_args}}),
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(
+        type='RandomResize',
+        scale=(1024, 1024),
+        ratio_range=(0.1, 2.0),
+        keep_ratio=True),
+    dict(type='RandomCrop', crop_size=(1024, 1024)),
+    dict(type='YOLOXHSVRandomAug'),
     dict(type='RandomFlip', prob=0.5),
+    dict(type='Pad', size=(1024, 1024), pad_val=dict(img=(114, 114, 114))),
     dict(type='PackDetInputs')
 ]
+
 test_pipeline = [
-    dict(type='LoadImageFromFile', backend_args=backend_args),
+    dict(type='LoadImageFromFile', backend_args={{_base_.backend_args}}),
     dict(type='Resize', scale=(1024, 1024), keep_ratio=True),
     dict(type='Pad', size=(1024, 1024), pad_val=dict(img=(114, 114, 114))),
-    # If you don't have a gt annotation, delete the pipeline
-    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
     dict(
         type='PackDetInputs',
         meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
                    'scale_factor'))
 ]
+
+data_root = '/workspace/datasets/vhr10/'
+meta_info = dict(
+    classes=('airplane', 'ship', 'storage tank', 'baseball diamond', 'tennis court',
+             'basketball court', 'ground track field', 'harbor', 'bridge', 'vehicle'),
+    palette=[[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [255, 0, 255], [
+        0, 255, 255], [255, 255, 255], [128, 0, 0], [0, 128, 0], [0, 0, 128]]
+)
+
+
 train_dataloader = dict(
-    batch_size=2,
-    num_workers=2,
-    persistent_workers=True,
-    sampler=dict(type='DefaultSampler', shuffle=True),
-    batch_sampler=dict(type='AspectRatioBatchSampler'),
+    batch_size=4,
+    num_workers=4,
+    batch_sampler=None,
+    pin_memory=True,
     dataset=dict(
-        type=dataset_type,
         data_root=data_root,
-        ann_file='annotations/instances_train2017.json',
-        data_prefix=dict(img='train2017/'),
-        filter_cfg=dict(filter_empty_gt=True, min_size=32),
-        pipeline=train_pipeline,
-        backend_args=backend_args))
+        metainfo=meta_info,
+        ann_file='instances_train2017.json',
+        data_prefix=dict(img='positive image set/'),
+        pipeline=train_pipeline))
 val_dataloader = dict(
     batch_size=1,
     num_workers=2,
-    persistent_workers=True,
-    drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
-        type=dataset_type,
         data_root=data_root,
-        ann_file='annotations/instances_val2017.json',
-        data_prefix=dict(img='val2017/'),
-        test_mode=True,
-        pipeline=test_pipeline,
-        backend_args=backend_args))
-test_dataloader = val_dataloader
-# visualizer = dict(type='MaskVisualizer', alpha=0.4)
+        metainfo=meta_info,
+        ann_file='instances_val2017.json',
+        data_prefix=dict(img='positive image set/'),
+        pipeline=test_pipeline))
+test_dataloader=val_dataloader
+
+val_evaluator = dict(
+    type='CocoMetric',
+    ann_file=data_root + 'instances_val2017.json',
+    metric=['bbox', 'segm'],
+    format_only=False)
+test_evaluator = val_evaluator
+
+max_epochs=24
+base_lr=0.004
+interval=12
+
+train_cfg=dict(
+    max_epochs=max_epochs,
+    val_interval=interval)
+
+# optimizer
+optim_wrapper=dict(
+    _delete_=True,
+    type='OptimWrapper',
+    optimizer=dict(type='AdamW', lr=base_lr, weight_decay=0.05),
+    paramwise_cfg=dict(
+        norm_decay_mult=0, bias_decay_mult=0, bypass_duplicate=True))
+
+# learning rate
+param_scheduler=[
+    dict(
+        type='LinearLR',
+        start_factor=1.0e-5,
+        by_epoch=False,
+        begin=0,
+        end=1000),
+    dict(
+        # use cosine lr from 150 to 300 epoch
+        type='CosineAnnealingLR',
+        eta_min=base_lr * 0.05,
+        begin=max_epochs // 2,
+        end=max_epochs,
+        T_max=max_epochs // 2,
+        by_epoch=True,
+        convert_to_iter_based=True),
+]
+
+# hooks
+default_hooks=dict(
+    checkpoint=dict(
+        interval=interval,
+        max_keep_ckpts=3  # only keep latest 3 checkpoints
+    ))
+custom_hooks=[
+    dict(
+        type='EMAHook',
+        ema_type='ExpMomentumEMA',
+        momentum=0.0002,
+        update_buffers=True,
+        priority=49)
+]

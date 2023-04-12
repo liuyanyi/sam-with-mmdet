@@ -1,0 +1,4 @@
+git+https://github.com/facebookresearch/segment-anything.git
+mmdetection==3.0.0
+mmcv==2.0.0
+fire

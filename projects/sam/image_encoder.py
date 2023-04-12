@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,13 +27,14 @@ class ImageEncoderViT(nn.Module):
         mlp_ratio: float = 4.0,
         out_chans: int = 256,
         qkv_bias: bool = True,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
+        norm_layer: Type[nn.Module] = partial(torch.nn.LayerNorm, eps=1e-6),
         act_layer: Type[nn.Module] = nn.GELU,
         use_abs_pos: bool = True,
         use_rel_pos: bool = False,
         rel_pos_zero_init: bool = True,
         window_size: int = 0,
         global_attn_indexes: Tuple[int, ...] = (),
+        with_neck: bool = True,
     ) -> None:
         """
         Args:
@@ -85,23 +87,28 @@ class ImageEncoderViT(nn.Module):
             )
             self.blocks.append(block)
 
-        self.neck = nn.Sequential(
-            nn.Conv2d(
-                embed_dim,
-                out_chans,
-                kernel_size=1,
-                bias=False,
-            ),
-            LayerNorm2d(out_chans),
-            nn.Conv2d(
-                out_chans,
-                out_chans,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-            ),
-            LayerNorm2d(out_chans),
-        )
+        if with_neck:
+
+            self.neck = nn.Sequential(
+                nn.Conv2d(
+                    embed_dim,
+                    out_chans,
+                    kernel_size=1,
+                    bias=False,
+                ),
+                LayerNorm2d(out_chans),
+                nn.Conv2d(
+                    out_chans,
+                    out_chans,
+                    kernel_size=3,
+                    padding=1,
+                    bias=False,
+                ),
+                LayerNorm2d(out_chans),
+            )
+        self.eval()
+        for param in self.parameters():
+            param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.patch_embed(x)
@@ -111,7 +118,10 @@ class ImageEncoderViT(nn.Module):
         for blk in self.blocks:
             x = blk(x)
 
-        x = self.neck(x.permute(0, 3, 1, 2))
+        if hasattr(self, "neck"):
+            x = self.neck(x.permute(0, 3, 1, 2))
+        else:
+            x = x.permute(0, 3, 1, 2)
 
         return x
 

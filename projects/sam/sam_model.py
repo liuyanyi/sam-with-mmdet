@@ -10,7 +10,7 @@ import torch
 from torch.nn import functional as F
 
 from mmdet.models.task_modules import MlvlPointGenerator
-from mmdet.structures.det_data_sample import SampleList
+from mmdet.structures.det_data_sample import SampleList, DetDataSample
 from mmengine.structures import InstanceData
 from mmcv.ops import batched_nms
 
@@ -21,10 +21,12 @@ class SAM(BaseDetector):
     def __init__(self,
                  backbone: ConfigType,
                  neck: OptConfigType = None,
+                 share_backbone: bool = False,
                  prompt_generator: OptConfigType = None,
                  prompt_encoder: OptConfigType = None,
                  mask_decoder: OptConfigType = None,
                  train_cfg: OptConfigType = None,
+                 prompt_test_cfg: OptConfigType = None,
                  test_cfg: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
                  init_cfg: OptMultiConfig = None):
@@ -34,7 +36,11 @@ class SAM(BaseDetector):
         if neck is not None:
             self.neck = MODELS.build(neck)
 
+        self.share_backbone = share_backbone
         if prompt_generator is not None:
+            if share_backbone:
+                prompt_generator.update(train_cfg=train_cfg)
+                prompt_generator.update(test_cfg=prompt_test_cfg)
             self.prompt_generator = MODELS.build(prompt_generator)
             self.use_prompt_generator = True
         else:
@@ -46,7 +52,9 @@ class SAM(BaseDetector):
         self.test_cfg = test_cfg
 
     def loss(self, batch_inputs: Tensor, batch_data_samples: SampleList) -> Union[dict, tuple]:
-        raise NotImplementedError
+        x = self.extract_feat(batch_inputs)
+        losses = self.prompt_generator.loss(x, batch_data_samples)
+        return losses
 
     def generate_masks_by_points(self,
                                  image_embeddings: Tensor,
@@ -132,12 +140,27 @@ class SAM(BaseDetector):
             labels = pred_ins[0].labels
             boxes = pred_ins[0].bboxes
             scores = pred_ins[0].scores
-
-            sparse_embeddings, dense_embeddings = self.prompt_encoder(
-                points=None,
-                boxes=boxes,
-                masks=None,
-            )
+            
+            prompt_type = self.test_cfg.get('prompt_type', 'box')
+            if prompt_type == 'point':
+                points = (boxes[:, 2:] + boxes[:, :2]) * 0.5
+                batch_labels = torch.ones(
+                    points.shape[0], dtype=torch.int, device=device)
+                batch_ipt = (points[:, None, :], batch_labels[:, None])
+                sparse_embeddings, dense_embeddings = self.prompt_encoder(
+                    points=batch_ipt,
+                    boxes=None,
+                    masks=None,
+                )
+            elif prompt_type == 'box':
+                sparse_embeddings, dense_embeddings = self.prompt_encoder(
+                    points=None,
+                    boxes=boxes,
+                    masks=None,
+                )
+            else:
+                raise ValueError(f'prompt_type {prompt_type} not supported')
+            
             multimask_output = self.test_cfg.get("multimask_output", False)
             mask, iou = self.mask_decoder(
                 image_embeddings=image_embeddings,
@@ -170,11 +193,12 @@ class SAM(BaseDetector):
             if self.test_cfg.get("pred_iou_thresh", 0) > 0:
                 keep_inds = iou > self.test_cfg.pred_iou_thresh
                 single_result = single_result[keep_inds]
+                mask = mask[keep_inds]
 
-            stability_score = calculate_stability_score(
-                mask[keep_inds], 0.0, self.test_cfg.stability_score_offset
-            )
             if self.test_cfg.get("stability_score_thresh", 0) > 0:
+                stability_score = calculate_stability_score(
+                    mask, 0.0, self.test_cfg.stability_score_offset
+                )
                 keep_mask = stability_score >= self.test_cfg.stability_score_thresh
                 single_result = single_result[keep_mask]
 
@@ -215,6 +239,8 @@ class SAM(BaseDetector):
                     the last dimension 4 arrange as (x1, y1, x2, y2).
         """
         x = self.extract_feat(batch_inputs)
+        if self.neck is not None:
+            image_embeddings = x[self.neck.identy_level]
 
         input_size = batch_data_samples[0].batch_input_shape
         ori_shape = batch_data_samples[0].ori_shape
@@ -228,13 +254,22 @@ class SAM(BaseDetector):
 
         if self.use_prompt_generator:
             points = None
+            if self.share_backbone:
+                prompt_in = x
+            else:
+                prompt_in = batch_inputs
             # Generate Prompt Boxes
             # noneed to rescale, because sam will use the resized size, not the original size
-            generated_prompt = self.prompt_generator.predict(batch_inputs,
+            generated_prompt = self.prompt_generator.predict(prompt_in,
                                                              batch_data_samples, rescale=False)
-            pred_instances = generated_prompt[0].pred_instances
+            if isinstance(generated_prompt[0], DetDataSample):
+                pred_instances = generated_prompt[0].pred_instances
+            else:
+                pred_instances = generated_prompt[0]
+            # keep_mask = pred_instances.scores > 0.3
+            # pred_instances = pred_instances[keep_mask]
             results = self.generate_masks_by_pred_instances(
-                x, pred_instances, ori_shape, resize_shape)
+                image_embeddings, pred_instances, ori_shape, resize_shape)
         else:
             # Generate points
             points_per_side = self.test_cfg.get("points_per_side", 32)
@@ -251,17 +286,18 @@ class SAM(BaseDetector):
                 [(pps_x, pps_y), ], device=x.device)
             points = points[0][:, :2]
             results = self.generate_masks_by_points(
-                x, points, ori_shape, resize_shape)
+                image_embeddings, points, ori_shape, resize_shape)
 
         # Do nms if nms config is not None
         if self.test_cfg.nms is not None:
-            _, keep_idxs = batched_nms(
-                results.bboxes,
-                results.scores,
-                results.labels,
-                self.test_cfg.nms)
+            if len(results) > 0:
+                _, keep_idxs = batched_nms(
+                    results.bboxes,
+                    results.scores,
+                    results.labels,
+                    self.test_cfg.nms)
 
-            results = results[keep_idxs]
+                results = results[keep_idxs]
 
         batch_data_samples = self.add_pred_to_datasample(
             batch_data_samples, [results, ])

@@ -8,7 +8,13 @@ Only inputs with bs of 1 are currently supported, and evaluation on COCO have no
 
 ## Usage
 
-1. Install mmdet following the [official guide](https://mmdetection.readthedocs.io/en/v3.0.0/get_started.html)
+1. Install mmdetection
+
+    ``` bash
+    pip install openmim
+    mim install mmengine 'mmcv>=2.0.0' 'mmdet>=3.0.0'
+    ```
+
 2. Install segment-anything
 
     ``` bash
@@ -18,13 +24,13 @@ Only inputs with bs of 1 are currently supported, and evaluation on COCO have no
 3. Download the pretrained model vit-b and mmdet model, then use merge_sam_det to merge them.
 
     ``` bash
-    python merge_sam_det.py ./sam_vit_b_01ec64.pth ./rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth ./configs/rtm_l_sam_b.py ./merge.pth
+    python ./tools/merge_sam_det.py ./sam_vit_b_01ec64.pth ./rtmdet_l_8xb32-300e_coco_20220719_112030-5a0be7c4.pth ./configs/rtm_l_sam_b.py ./merge.pth
     ```
 
 4. Run the demo
 
     ``` bash
-    python demo.py ./000000001309.jpg configs/rtm_l_sam_b.py merge.pth
+    python ./tools/demo.py ./000000001309.jpg configs/rtm_l_sam_b.py merge.pth
     ```
 
 ![result](/assets/result.png)
